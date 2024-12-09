@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QFileDialog, QAction
 from .ui import ui_ptycho
 from .core.utils import clean_shared_memory, get_mpi_num_processes, parse_range2
 from .core.ptycho_param import Param
-from .core.ptycho_recon import PtychoReconWorker, PtychoReconFakeWorker, HardWorker
+from .core.ptycho_recon import PtychoReconWorker, PtychoReconFakeWorker, HardWorker, PtychoReconSlurmWorker, PtychoReconSlurmLocalWorker
 from .core.ptycho_qt_utils import PtychoStream
 from .core.widgets.list_widget import ListWidget
 from .core.widgets.mplcanvas import load_image_pil
@@ -33,7 +33,8 @@ import mmap
 
 
 # set True for testing GUI changes
-_TEST = False
+_TEST = True
+_SLURM = True
 
 # for shared memory
 mm_list = []
@@ -521,7 +522,7 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
             self.recon_bar.setMaximum(self.param.n_iterations)
 
             # at least one GPU needs to be selected
-            if self.param.gpu_flag and len(self.param.gpus) == 0 and self.param.mpi_file_path == '':
+            if not _SLURM and self.param.gpu_flag and len(self.param.gpus) == 0 and self.param.mpi_file_path == '':
                 print("[WARNING] select at least one GPU!", file=sys.stderr)
                 return
 
@@ -573,7 +574,10 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
                     # TODO: maybe a thorough cleanup???
                     self.reconStepWindow.close()
 
-            if not _TEST:
+            if _SLURM:
+                # thread = self._ptycho_gpu_thread = PtychoReconSlurmWorker(self.param, parent=self)
+                thread = self._ptycho_gpu_thread = PtychoReconSlurmLocalWorker(self.param, parent=self)
+            elif not _TEST:
                 thread = self._ptycho_gpu_thread = PtychoReconWorker(self.param, parent=self)
             else:
                 thread = self._ptycho_gpu_thread = PtychoReconFakeWorker(self.param, parent=self)

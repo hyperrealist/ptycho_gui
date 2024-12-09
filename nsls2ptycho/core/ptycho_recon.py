@@ -4,10 +4,12 @@ from .ptycho_param import Param
 import sys, os
 import pickle     # dump param into disk
 import subprocess # call mpirun from shell
+from textwrap import dedent
 from fcntl import fcntl, F_GETFL, F_SETFL
 from os import O_NONBLOCK
 import numpy as np
 import traceback
+import time
 
 from .databroker_api import load_metadata, save_data
 from .utils import use_mpi_machinefile, set_flush_early
@@ -322,9 +324,105 @@ class PtychoReconFakeWorker(QtCore.QThread):
             _id, _alg, _it, _metric = self._parse_message(message)
 
             update_fcn(_it+1, _metric)
-            sleep(.1)
+            sleep(1)
 
         print("finished")
 
+    def kill(self):
+        pass
+
+
+class PtychoReconSlurmWorker(QtCore.QThread):
+    update_signal = QtCore.pyqtSignal(int, object)
+
+    def __init__(self, param: Param=None, parent=None):
+        super().__init__(parent)
+        self.param = param
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        self.config_file = f'conf_{self.timestamp}.txt'
+        self.sbatch_file = f'submit_{self.timestamp}.sh'
+        self._exportConfigHelper(filename=self.config_file)
+        self._exportSlurmJobHelper(filename=self.sbatch_file, config_filename=self.config_file)
+
+    def _exportConfigHelper(self, filename: str):
+        keys = list(self.param.__dict__.keys())
+        keys.sort()
+        filepath = f'{self.param.working_directory}/{filename}'
+        with open(filepath, 'w') as f:
+            f.write("[GUI]\n")
+            for key in keys:
+                # skip a few items related to databroker
+                if key == 'points' or key == 'ic' or key == 'mds_table':
+                    continue
+                f.write(key+" = "+str(self.param.__dict__[key])+"\n")
+    
+    def _exportSlurmJobHelper(self, filename: str, config_filename: str):
+        filepath = f'{self.param.working_directory}/{filename}'
+        with open(filepath, 'w') as f:
+            f.write('#!/bin/bash')
+            f.write(dedent(f'''
+                #SBATCH --job-name=ptycho
+                #SBATCH --qos=normal
+                #SBATCH --gres=gpu
+                #SBATCH --time=0-01:00:00
+
+                #SBATCH --ntasks=2
+                #SBATCH --ntasks-per-node=2
+                #SBATCH --gres=gpu:2
+
+                #SBATCH --partition=normal
+                #SBATCH --error=%x.%J.err
+                #SBATCH --output=%x.%J.out
+
+                srun --mpi=pmi2 run-ptycho-backend {config_filename}
+            '''))
+
+    def run(self):
+        raise NotImplementedError
+
+    def kill(self):
+        raise NotImplementedError
+
+
+class PtychoReconSlurmLocalWorker(PtychoReconSlurmWorker):
+
+    def __init__(self, param: Param=None, parent=None):
+        super().__init__(param, parent)
+    
+    def _runHelper(self, cmd: str):
+        return subprocess.run(cmd.split(), stdout=subprocess.PIPE).stdout.decode('utf-8')
+
+    def run(self):
+        os.chdir(self.param.working_directory)
+
+        sbatch_cmd = f'sbatch --parsable {self.sbatch_file}'
+        print(sbatch_cmd)
+        job_id = subprocess.run(
+            sbatch_cmd.split(),
+            stdout=subprocess.PIPE,
+        ).stdout.decode('utf-8')
+        job_id = job_id.split(';')[0].strip()
+
+        print(f'{job_id = }')
+
+        while True:
+            time.sleep(1)
+            try:
+                status = subprocess.run(
+                    f'sacct -j {job_id}'.split(),
+                    stdout=subprocess.PIPE,
+                ).stdout.decode('utf-8')
+                print(status)
+            except Exception as e:
+                print(e)
+
+        # # TODO:
+        # '''
+        #     get job status from job_id and wait for completion
+        #     next:
+        #         periodically write _id, _alg, _it, _metric from backend
+                
+        # '''
+    
     def kill(self):
         pass
