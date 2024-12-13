@@ -392,6 +392,10 @@ class PtychoReconSlurmLocalWorker(PtychoReconSlurmWorker):
     def _runHelper(self, cmd: str):
         return subprocess.run(cmd.split(), stdout=subprocess.PIPE).stdout.decode('utf-8')
 
+    def _exec(cmd : list) -> str:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE)
+        return out.stdout.decode('utf-8').strip()
+
     def run(self):
         os.chdir(self.param.working_directory)
 
@@ -405,21 +409,34 @@ class PtychoReconSlurmLocalWorker(PtychoReconSlurmWorker):
 
         print(f'{job_id = }')
 
+
+        MAX_RETRIES = 10
         while True:
             time.sleep(1)
+            retry = 0
             try:
-                status = subprocess.run(
-                    f'sacct -j {job_id}'.split(),
-                    stdout=subprocess.PIPE,
-                ).stdout.decode('utf-8')
-                print(status)
+                # detailed status
+                sacct = self._exec(f'sacct -j {job_id}'.split())
+                print(sacct)
+
+                # get parsable job status
+                status = self._exec(f'squeue -j {job_id} --format=%T -h --noheader'.split()).lower()
+                if not status in ['running', 'pending']:
+                    print('Server process has concluded.')
+                    break
+                retry = 0
             except Exception as e:
-                print(e)
+                retry += 1
+                if retry > MAX_RETRIES:
+                    print(e)
+                    break
+                print(f"trying to reconnect to server...({retry}/{MAX_RETRIES})")
+                
 
         # # TODO:
         # '''
-        #     get job status from job_id and wait for completion
         #     next:
+        #         implement kill
         #         periodically write _id, _alg, _it, _metric from backend
                 
         # '''
