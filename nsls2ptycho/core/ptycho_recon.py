@@ -343,6 +343,7 @@ class PtychoReconSlurmWorker(QtCore.QThread):
         self.sbatch_file = f'submit_{self.timestamp}.sh'
         self._exportConfigHelper(filename=self.config_file)
         self._exportSlurmJobHelper(filename=self.sbatch_file, config_filename=self.config_file)
+        self.job_id = None  # SLURM job ID
 
     def _exportConfigHelper(self, filename: str):
         keys = list(self.param.__dict__.keys())
@@ -392,54 +393,72 @@ class PtychoReconSlurmLocalWorker(PtychoReconSlurmWorker):
     def _runHelper(self, cmd: str):
         return subprocess.run(cmd.split(), stdout=subprocess.PIPE).stdout.decode('utf-8')
 
-    def _exec(cmd : list) -> str:
-        out = subprocess.run(cmd, stdout=subprocess.PIPE)
-        return out.stdout.decode('utf-8').strip()
+    def _exec(self, cmd : list) -> str:
+        MAX_RETRIES, retry = 10, 0
+        while True:
+            try:
+                retry += 1
+                out = subprocess.run(cmd, stdout=subprocess.PIPE)
+                return out.stdout.decode('utf-8').strip()
+            except Exception as e:
+                if retry > MAX_RETRIES:
+                    raise e
+                print(f"Retrying in 1 second... {retry}/{MAX_RETRIES}")
+                time.sleep(1)
 
     def run(self):
-        os.chdir(self.param.working_directory)
+        # os.chdir(self.param.working_directory)
 
-        sbatch_cmd = f'sbatch --parsable {self.sbatch_file}'
-        print(sbatch_cmd)
-        job_id = subprocess.run(
-            sbatch_cmd.split(),
-            stdout=subprocess.PIPE,
-        ).stdout.decode('utf-8')
-        job_id = job_id.split(';')[0].strip()
+        # sbatch_cmd = f'sbatch --parsable {self.sbatch_file}'
+        # print(sbatch_cmd)
+        # job_id = subprocess.run(
+        #     sbatch_cmd.split(),
+        #     stdout=subprocess.PIPE,
+        # ).stdout.decode('utf-8')
+        # job_id = job_id.split(';')[0].strip()
+        # self.job_id = job_id
 
-        print(f'{job_id = }')
+        # print(f'{job_id = }')
 
+        try:
+            print(self)
+            print(self.update_signal)
+            print(self.param.n_iterations)
+            self.update_signal.emit(self.param.n_iterations+1, None)
+        except Exception as e:
+            print(e)
 
-        MAX_RETRIES = 10
-        while True:
-            time.sleep(1)
-            retry = 0
-            try:
-                # detailed status
-                sacct = self._exec(f'sacct -j {job_id}'.split())
-                print(sacct)
+        # try:
+        #     while True:
+        #         time.sleep(1)
 
-                # get parsable job status
-                status = self._exec(f'squeue -j {job_id} --format=%T -h --noheader'.split()).lower()
-                if not status in ['running', 'pending']:
-                    print('Server process has concluded.')
-                    break
-                retry = 0
-            except Exception as e:
-                retry += 1
-                if retry > MAX_RETRIES:
-                    print(e)
-                    break
-                print(f"trying to reconnect to server...({retry}/{MAX_RETRIES})")
-                
+        #         # detailed status
+        #         sacct = self._exec(f'sacct -j {job_id}'.split())
+        #         print(sacct)
+
+        #         # get parsable job status
+        #         status = self._exec(f'squeue -j {job_id} --format=%T -h --noheader'.split()).lower()
+        #         if not status in ['running', 'pending']:
+        #             print('Server process has concluded.')
+        #             break
+        # except Exception as e:
+        #     print(e)
+        # else:
+        #     if self.param.preview_flag and self.return_value == 0:
+        #         self.update_signal.emit(self.param.n_iterations+1, None)
+
 
         # # TODO:
         # '''
         #     next:
-        #         implement kill
         #         periodically write _id, _alg, _it, _metric from backend
-                
         # '''
     
     def kill(self):
-        pass
+        print(f'Cancelling job {self.job_id}....')
+        try:
+            self._exec(['scancel', self.job_id])
+        except Exception as e:
+            print(e)
+        finally:
+            print(f'Request sent.')
