@@ -1,4 +1,5 @@
 import sys
+import traceback
 import os
 import random
 import time
@@ -33,12 +34,19 @@ import mmap
 
 
 # set True for testing GUI changes
-_TEST = True
+_TEST = False
 _SLURM = True
 
 # for shared memory
 mm_list = []
 shm_list = []
+
+
+# exception logging
+def excepthook(exc_type, exc_value, exc_traceback):
+       traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+
+sys.excepthook = excepthook
 
 
 class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
@@ -694,11 +702,14 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
             if not _TEST and self.ck_preview_flag.isChecked():
                 try:
                     if it == -1 and data == 'init_mmap':
+                        print('init_map')
                         try:
                             # the two npy are created by ptycho by this time
                             self.init_mmap()
-                        except ExistentialError:
+                        except ExistentialError as e:
                             # user may kill the process prematurely
+                            print(e, file=sys.stderr)
+                            print("Aborting...", file=sys.stderr)
                             self.stop()
                     elif it == self.param.n_iterations+1:
                         # reserve it=n_iterations+1 as the working space
