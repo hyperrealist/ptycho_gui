@@ -10,6 +10,8 @@ from os import O_NONBLOCK
 import numpy as np
 import traceback
 import time
+import base64
+import io
 
 from .databroker_api import load_metadata, save_data
 from .utils import use_mpi_machinefile, set_flush_early
@@ -28,10 +30,10 @@ class PtychoReconWorker(QtCore.QThread):
         def _parser(current, upper_limit, target_list):
             for j in range(upper_limit):
                 target_list.append(float(tokens[current+2+j]))
-    
+
         # assuming tokens (stdout line) is split but not yet processed
         it = int(tokens[2])
-        
+
         # first remove brackets
         empty_index_list = []
         for i, token in enumerate(tokens):
@@ -338,11 +340,20 @@ class PtychoReconSlurmWorker(QtCore.QThread):
     def __init__(self, param: Param=None, parent=None):
         super().__init__(parent)
         self.param = param
+        self.param.slurm_flag = True
+        if not self.param.working_directory[-1] == "/":
+            # this is needed because ptycho_trans_ml.py appends paths like "./..."
+            self.param.working_directory += "/"
+        self.job_name = "ptycho"  # this could be made a param from the ui
         self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         self.config_file = f'conf_{self.timestamp}.txt'
         self.sbatch_file = f'submit_{self.timestamp}.sh'
         self._exportConfigHelper(filename=self.config_file)
-        self._exportSlurmJobHelper(filename=self.sbatch_file, config_filename=self.config_file)
+        self._exportSlurmJobHelper(
+            filename=self.sbatch_file,
+            config_filename=self.config_file,
+            job_name=self.job_name
+        )
         self.job_id = None  # SLURM job ID
 
     def _exportConfigHelper(self, filename: str):
@@ -357,26 +368,30 @@ class PtychoReconSlurmWorker(QtCore.QThread):
                     continue
                 f.write(key+" = "+str(self.param.__dict__[key])+"\n")
     
-    def _exportSlurmJobHelper(self, filename: str, config_filename: str):
+    def _exportSlurmJobHelper(self, filename: str, config_filename: str, job_name: str):
         filepath = f'{self.param.working_directory}/{filename}'
+
         with open(filepath, 'w') as f:
-            f.write('#!/bin/bash')
-            f.write(dedent(f'''
-                #SBATCH --job-name=ptycho
-                #SBATCH --qos=normal
-                #SBATCH --gres=gpu
-                #SBATCH --time=0-01:00:00
+            f.write(
+                dedent(f'''
+                    #!/bin/bash
 
-                #SBATCH --ntasks=2
-                #SBATCH --ntasks-per-node=2
-                #SBATCH --gres=gpu:2
+                    #SBATCH --job-name={job_name}
+                    #SBATCH --qos=normal
+                    #SBATCH --gres=gpu
+                    #SBATCH --time=0-01:00:00
 
-                #SBATCH --partition=normal
-                #SBATCH --error=%x.%J.err
-                #SBATCH --output=%x.%J.out
+                    #SBATCH --ntasks=2
+                    #SBATCH --ntasks-per-node=2
+                    #SBATCH --gres=gpu:2
 
-                srun --mpi=pmi2 run-ptycho-backend {config_filename}
-            '''))
+                    #SBATCH --partition=normal
+                    #SBATCH --error=%x.%j.err
+                    #SBATCH --output=%x.%j.out
+
+                    srun --unbuffered --mpi=pmi2 run-ptycho-backend {config_filename}
+                ''').strip()
+            )
 
     def run(self):
         raise NotImplementedError
@@ -401,58 +416,215 @@ class PtychoReconSlurmLocalWorker(PtychoReconSlurmWorker):
                 out = subprocess.run(cmd, stdout=subprocess.PIPE)
                 return out.stdout.decode('utf-8').strip()
             except Exception as e:
+                print(e, file=sys.stderr)
                 if retry > MAX_RETRIES:
                     raise e
                 print(f"Retrying in 1 second... {retry}/{MAX_RETRIES}")
                 time.sleep(1)
 
-    def run(self):
-        # os.chdir(self.param.working_directory)
+    def _parse_message(self, tokens):
+        # TODO: rewrite this!
 
-        # sbatch_cmd = f'sbatch --parsable {self.sbatch_file}'
-        # print(sbatch_cmd)
-        # job_id = subprocess.run(
-        #     sbatch_cmd.split(),
-        #     stdout=subprocess.PIPE,
-        # ).stdout.decode('utf-8')
-        # job_id = job_id.split(';')[0].strip()
-        # self.job_id = job_id
+        def _parser(current, upper_limit, target_list):
+            for j in range(upper_limit):
+                target_list.append(float(tokens[current+2+j]))
 
-        # print(f'{job_id = }')
+        # assuming tokens (stdout line) is split but not yet processed
+        it = int(tokens[2])
+
+        # first remove brackets
+        empty_index_list = []
+        for i, token in enumerate(tokens):
+            tokens[i] = token.replace('[', '').replace(']', '')
+            if tokens[i] == '':
+                empty_index_list.append(i)
+        counter = 0
+        for i in empty_index_list:
+            del tokens[i-counter]
+            counter += 1
+
+        # next parse based on param and the known format
+        prb_list = []
+        obj_list = []
+        for i, token in enumerate(tokens):
+            if token == 'probe_chi':
+                if self.param.mode_flag:
+                    _parser(i, self.param.prb_mode_num, prb_list)
+                #elif self.param.multislice_flag:
+                #TODO: maybe multislice will have multiple prb in the future?
+                else:
+                    _parser(i, 1, prb_list)
+            if token == 'object_chi':
+                if self.param.mode_flag:
+                    _parser(i, self.param.obj_mode_num, obj_list)
+                elif self.param.multislice_flag:
+                    _parser(i, self.param.slice_num, obj_list)
+                else:
+                    _parser(i, 1, obj_list)
+
+        # return a dictionary
+        result = {'probe_chi':prb_list, 'object_chi':obj_list}
+
+        return it, result
+
+    def _test_stdout_completeness(self, stdout):
+        counter = 0
+        for token in stdout:
+            if token == '=':
+                counter += 1
+
+        return counter
+
+    def _parse_one_line(self):
+        stdout_2 = self.process.stdout.readline().decode('utf-8')
+        print(stdout_2, end='') # because the line already ends with '\n'
+
+        return stdout_2.split()
+
+    def _parse_result(self, stdout):
+        header, it, array_type, encapsulation, array = stdout
+        if not header == "[RESULT]":
+            raise ValueError(f"'[RESULT]' header expected, given {header}")
+        if encapsulation == "b64":
+            # base64
+            it = int(it)
+            with io.BytesIO(base64.b64decode(array)) as buffer:
+                np_array = np.load(buffer)
+            return it, array_type, np_array
+        else:
+            raise NotImplementedError(f"decoding {encapsulation = } is not implemented")
+
+    def _print_msg(self, msg):
+        print(' '.join(msg))
+
+
+    def recon_slurm(self, param:Param, update_fcn=None):
+        os.chdir(param.working_directory)
+
+        sbatch_cmd = f'sbatch --parsable {self.sbatch_file}'
+        job_id = subprocess.run(
+            sbatch_cmd.split(),
+            stdout=subprocess.PIPE,
+        ).stdout.decode('utf-8')
+        job_id = job_id.split(';')[0].strip()
+        self.job_id = job_id
+
+        print(f'{job_id = }')
+
+        print('Job scheduled. Waiting for SLURM ...')
+        # wait for job to start
+        status = 'pending'
+        retry_count = 0
+        max_retries = 5
+        while status == 'pending':
+            time.sleep(1)
+            try:
+                status = self._exec(f'squeue -j {job_id} --format=%T -h --noheader'.split()).lower()
+            except Exception as e:
+                print(e, file=sys.stderr)
+                retry_count += 1
+                if not retry_count < max_retries:
+                    print(dedent(f"""
+                        Something went wrong. Please manually check the slurm job status.
+                        SLURM job ID reported = {job_id}.
+                        Example:
+                            squeue -j {job_id}
+                    """).strip(), file=sys.stderr)
+                    break
+                print("Trying again...")
 
         try:
-            print(self)
-            print(self.update_signal)
-            print(self.param.n_iterations)
-            self.update_signal.emit(self.param.n_iterations+1, None)
+
+            with subprocess.Popen(f"sattach {job_id}.0".split(),
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE) as run_ptycho:
+                self.process = run_ptycho # register the subprocess
+                flags = fcntl(run_ptycho.stderr, F_GETFL) # first get current stderr flags
+                fcntl(run_ptycho.stderr, F_SETFL, flags | O_NONBLOCK)
+
+                it = 0
+                update_fcn(-1, "init_slurm_mmap")
+
+                while True:
+                    stdout = run_ptycho.stdout.readline()
+                    stderr = run_ptycho.stderr.readline() # without O_NONBLOCK this will very likely block
+
+                    if (run_ptycho.poll() is not None) and (stdout==b'') and (stderr==b''):
+                        break
+
+                    if stdout:
+                        stdout = stdout.decode('utf-8')
+                        stdout = stdout.split()
+                        if stdout[0] == "[RESULT]":
+                            self._print_msg(stdout[:-1])
+                            it, array_type, array = self._parse_result(stdout)
+                            update_fcn(-2, [it, array_type, array]) #  send decoded array to GUI
+                        elif len(stdout) > 2 and stdout[0] == "[INFO]" and update_fcn is not None:
+                            self._print_msg(stdout)
+                            # TEST: check if stdout is complete by examining the number of "="
+                            # TODO: improve this ugly hack...
+                            while True:
+                                counter = self._test_stdout_completeness(stdout)
+                                if counter == 3:
+                                    break
+                                elif counter < 3:
+                                    stdout += self._parse_one_line()
+                                else: # counter > 3, we read one more line!
+                                    raise Exception("parsing error")
+
+                            it, result = self._parse_message(stdout)
+                            update_fcn(it+1, result)
+                        elif len(stdout) == 3 and stdout[0] == "shared" and update_fcn is not None:
+                            self._print_msg(stdout)
+                            update_fcn(-1, "init_mmap")
+                        else:
+                            self._print_msg(stdout)
+
+                    if stderr:
+                        stderr = stderr.decode('utf-8')
+                        print(stderr, file=sys.stderr, end='')
+
+                # get the return value
+                self.return_value = run_ptycho.poll()
+
+            if self.return_value != 0:
+                message = "At least one MPI process returned a nonzero value, so the whole job is aborted.\n"
+                message += "If you did not manually terminate it, consult the Traceback above to identify the problem."
+                raise Exception(message)
+
+        except Exception as ex:
+            print(ex, file=sys.stderr)
+            traceback.print_exc()
+        finally:
+            # clean up temp file
+            filepath = param.working_directory + "/." + param.shm_name + ".txt"
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+
+
+        # TODO:
+        '''
+            propagate slurm parameters to GUI
+        '''
+
+    def run(self):
+        print('Ptycho thread started')
+        try:
+            self.recon_slurm(self.param, self.update_signal.emit)
+        # except IndexError:
+        #     print("[ERROR] IndexError --- most likely a wrong MPI machine file is given?", file=sys.stderr)
+        # except:
+        #     # whatever happened in the MPI processes will always (!) generate traceback,
+        #     # so do nothing here
+        #     pass
         except Exception as e:
-            print(e)
-
-        # try:
-        #     while True:
-        #         time.sleep(1)
-
-        #         # detailed status
-        #         sacct = self._exec(f'sacct -j {job_id}'.split())
-        #         print(sacct)
-
-        #         # get parsable job status
-        #         status = self._exec(f'squeue -j {job_id} --format=%T -h --noheader'.split()).lower()
-        #         if not status in ['running', 'pending']:
-        #             print('Server process has concluded.')
-        #             break
-        # except Exception as e:
-        #     print(e)
-        # else:
-        #     if self.param.preview_flag and self.return_value == 0:
-        #         self.update_signal.emit(self.param.n_iterations+1, None)
-
-
-        # # TODO:
-        # '''
-        #     next:
-        #         periodically write _id, _alg, _it, _metric from backend
-        # '''
+            print(e, file=sys.stderr)
+        else:
+            # let preview window load results
+            if self.param.preview_flag and self.return_value == 0:
+                self.update_signal.emit(self.param.n_iterations+1, None)
+        finally:
+            print('finally?')
     
     def kill(self):
         print(f'Cancelling job {self.job_id}....')

@@ -1,0 +1,104 @@
+#!/bin/bash -u
+
+# default options
+default_conda_env=ptycho-pluto-dev
+default_target=pluto.nsls2.bnl.gov
+default_proxy=ssh.nsls2.bnl.gov
+proxy=
+user=
+verbose=
+proxy_jump=1
+
+function usage() {
+	toolname=$(basename "$0")
+	sed 's/^\t//' <<EOF
+
+	${toolname^^} is a tool for running ptycho GUI on a SLURM submit node.
+
+	Usage:
+		$toolname [OPTIONS]
+
+	By default, $toolname will first attempt to jump via $default_proxy,
+	and if not successful, attempt to connect directly to $default_target
+	and start ptycho GUI on the submit node.
+
+	Options:
+		--help, -h
+				Print this message and exit.
+		--no-jump, -n
+				Do not attempt ssh proxy jump.
+		--proxy PROXY, -p PROXY
+				Set ssh proxy (defaults to $default_proxy).
+		--target TARGET, -t TARGET
+				Login node of the slurm cluster.
+				Defaults to $default_target.
+		--user USER, -u USER
+				Specify username (defaults to \$USER).
+		--verbose, -v
+				Print verbose output.
+EOF
+}
+
+while (($#));
+do
+	case "$1" in
+	--help|-h)
+		usage
+		exit 0
+		;;
+	--no-jump|-n)
+		proxy_jump=0
+		shift 1
+		;;
+	--proxy|-p)
+		proxy="$2"
+		shift 2
+		;;
+	--target|-t)
+		target="$2"
+		shift 2
+		;;
+	--user|-u)
+		user="$2"
+		shift 2
+		;;
+	--verbose|-v)
+		verbose=-v
+		shift 1
+		;;
+	*)
+		echo -e "Invalid option '$1'\n" >&2
+		usage >&2
+		exit 1
+		;;
+	esac
+done
+
+proxy="${proxy:-$default_proxy}"
+target="${target:-$default_target}"
+user="${user:-$USER}"
+
+function message() {
+	echo "$(tput setaf 2)${@}$(tput sgr0)"
+}
+
+function send_payload() {
+	message "$1"
+	shift
+	ssh -X $verbose "$@" "${user}@${target}" '
+		 echo $(tput setaf 2)Connection successful!
+		echo Starting ptycho GUI as $(tput setaf 3)$USER$(tput setaf 2)...$(tput sgr0)
+		conda activate '"$default_conda_env"' && run-ptycho
+	'
+}
+
+if [[ $verbose == "-v" ]]; then
+	set -x
+fi
+
+((proxy_jump)) &&
+	send_payload "Attempting proxy jump via $proxy" -o "ProxyJump $proxy" ||
+	send_payload "Connecting to $target"
+
+message "Done!"
+

@@ -668,6 +668,10 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
             self._prb = np.ndarray(shape=(p.n_iterations, 1, p.nx, p.ny), dtype=datatype, buffer=mm_list[1], order='C')
             self._obj = np.ndarray(shape=(p.n_iterations, 1, nx_obj, ny_obj), dtype=datatype, buffer=mm_list[2], order='C')
 
+    def init_slurm_mmap(self):
+        self._prb_slurm = {}
+        self._obj_slurm = {}
+
 
     def close_mmap(self):
         # We close shared memory as long as the backend is terminated either normally or 
@@ -702,7 +706,6 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
             if not _TEST and self.ck_preview_flag.isChecked():
                 try:
                     if it == -1 and data == 'init_mmap':
-                        print('init_map')
                         try:
                             # the two npy are created by ptycho by this time
                             self.init_mmap()
@@ -711,6 +714,14 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
                             print(e, file=sys.stderr)
                             print("Aborting...", file=sys.stderr)
                             self.stop()
+                    elif it == -1 and data == 'init_slurm_mmap':
+                        self.init_slurm_mmap()
+                    elif it == -2:
+                        step, array_type, array = data
+                        if array_type == "prb":
+                            self._prb_slurm[step] = array
+                        elif array_type == "obj":
+                            self._obj_slurm[step] = array
                     elif it == self.param.n_iterations+1:
                         # reserve it=n_iterations+1 as the working space
                         self.reconStepWindow.current_max_iters = self.param.n_iterations
@@ -778,33 +789,58 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
 
                         self.reconStepWindow.update_images(it, images)
                     elif (it-1) % self.param.display_interval == 0:
-                        if self.param.mode_flag:
-                            images = []
-                            for i in range(self.param.obj_mode_num):
-                                images.append(np.rot90(np.angle(self._obj[it-1, i])))
-                                images.append(np.rot90(np.abs(self._obj[it-1, i])))
-                            for i in range(self.param.prb_mode_num):
-                                images.append(np.rot90(np.abs(self._prb[it-1, i])))
-                                images.append(np.rot90(np.angle(self._prb[it-1, i])))
-                        elif self.param.multislice_flag:
-                            images = []
-                            for i in range(self.param.slice_num):
-                                images.append(np.rot90(np.angle(self._obj[it-1, i])))
-                                images.append(np.rot90(np.abs(self._obj[it-1, i])))
-                            #TODO: decide which probe we'd like to present
-                            images.append(np.rot90(np.abs(self._prb[it-1, 0])))
-                            images.append(np.rot90(np.angle(self._prb[it-1, 0])))
+                        if self.param.slurm_flag:
+                            if self.param.mode_flag:
+                                images = []
+                                for i in range(self.param.obj_mode_num):
+                                    images.append(np.rot90(np.angle(self._obj_slurm[it-1][i])))
+                                    images.append(np.rot90(np.abs(self._obj_slurm[it-1][i])))
+                                for i in range(self.param.prb_mode_num):
+                                    images.append(np.rot90(np.abs(self._prb_slurm[it-1][i])))
+                                    images.append(np.rot90(np.angle(self._prb_slurm[it-1][i])))
+                            elif self.param.multislice_flag:
+                                images = []
+                                for i in range(self.param.slice_num):
+                                    images.append(np.rot90(np.angle(self._obj_slurm[it-1][i])))
+                                    images.append(np.rot90(np.abs(self._obj_slurm[it-1][i])))
+                                #TODO: decide which probe we'd like to present
+                                images.append(np.rot90(np.abs(self._prb_slurm[it-1][0])))
+                                images.append(np.rot90(np.angle(self._prb_slurm[it-1][0])))
+                            else:
+                                images = []
+                                print(f"{self._obj_slurm[it-1][0].shape = }, {self._obj_slurm[it-1].shape = }")
+                                images = [np.rot90(np.angle(self._obj_slurm[it-1])),
+                                        np.rot90(np.abs(self._obj_slurm[it-1]  )),
+                                        np.rot90(np.abs(self._prb_slurm[it-1]  )),
+                                        np.rot90(np.angle(self._prb_slurm[it-1]))]
                         else:
-                            images = [np.rot90(np.angle(self._obj[it-1, 0])),
-                                      np.rot90(np.abs(self._obj[it-1, 0]  )),
-                                      np.rot90(np.abs(self._prb[it-1, 0]  )),
-                                      np.rot90(np.angle(self._prb[it-1, 0]))]
-                            
+                            if self.param.mode_flag:
+                                images = []
+                                for i in range(self.param.obj_mode_num):
+                                    images.append(np.rot90(np.angle(self._obj[it-1, i])))
+                                    images.append(np.rot90(np.abs(self._obj[it-1, i])))
+                                for i in range(self.param.prb_mode_num):
+                                    images.append(np.rot90(np.abs(self._prb[it-1, i])))
+                                    images.append(np.rot90(np.angle(self._prb[it-1, i])))
+                            elif self.param.multislice_flag:
+                                images = []
+                                for i in range(self.param.slice_num):
+                                    images.append(np.rot90(np.angle(self._obj[it-1, i])))
+                                    images.append(np.rot90(np.abs(self._obj[it-1, i])))
+                                #TODO: decide which probe we'd like to present
+                                images.append(np.rot90(np.abs(self._prb[it-1, 0])))
+                                images.append(np.rot90(np.angle(self._prb[it-1, 0])))
+                            else:
+                                images = [np.rot90(np.angle(self._obj[it-1, 0])),
+                                        np.rot90(np.abs(self._obj[it-1, 0]  )),
+                                        np.rot90(np.abs(self._prb[it-1, 0]  )),
+                                        np.rot90(np.angle(self._prb[it-1, 0]))]
+                        # print(images)
                         self.reconStepWindow.update_images(it, images)
                         self.reconStepWindow.update_metric(it, data)
 
                 except TypeError as ex: # when MPI processes are terminated, _prb and _obj are deleted and so not subscriptable 
-                    pass
+                    self.exception_handler(ex)
             else:
                 # -------------------- Sungsoo version -------------------------------------
                 # a list of random images for test
@@ -1221,7 +1257,7 @@ class MainWindow(QtWidgets.QMainWindow, ui_ptycho.Ui_MainWindow):
         try:
             thread.start()
         except Exception as err:
-            print(err)
+            self.exception_handler(err)
 
         # update Exp parameters. Note that there's a np.rot90 to the images in save_h5!!!
         self.sp_batch_x0.setValue(cx - roi_width // 2)
