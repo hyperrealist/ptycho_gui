@@ -1,6 +1,10 @@
 # BNL NSLS-II in-house ptychography software
 ## Introduction
 
+This repository contains the frontend of the NSLS-II ptyychography reconstruction software.
+
+SLURM-based workflow documentation is available [here](slurm_doc/README.md).
+
 ## Installation
 While one can `pip install` this pacakge directly, most likely the non-Python dependencies will not be available. For the time being, therefore, we recommend using Conda.
 
